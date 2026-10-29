@@ -1,0 +1,137 @@
+package controller
+
+import (
+	"context"                         // 用于处理上下文，提供超时、取消等操作
+	"github.com/go-logr/logr"         // 用于记录日志
+	"k8s.io/apimachinery/pkg/runtime" // 提供对象的通用机制，如序列化和版本转换
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client" // 提供与 Kubernetes API 交互的客户端
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	databasev1 "github.com/egonlin/api/v1" // 导入自定义的 MySQLCluster API 资源定义
+	v1 "k8s.io/api/core/v1"                // 核心 Kubernetes API 对象，例如 Pod 和 Service
+	ctrl "sigs.k8s.io/controller-runtime"
+)
+
+const (
+	MySQLPassword = "password" // Hardcoded MySQL password
+	//KubeConfigPath         = "/root/.kube/config" // Hardcoded kubeconfig path
+	MysqlClusterKind       = "MysqlCluster"
+	MysqlClusterAPIVersion = "apps.egonlin.com/v1"
+)
+
+// MysqlClusterReconciler reconciles a MysqlCluster object
+type MysqlClusterReconciler struct {
+	client.Client             // 嵌入 client.Client 接口，用于与 Kubernetes API 交互
+	Log           logr.Logger // 日志记录器
+	Scheme        *runtime.Scheme
+}
+
+/*
+在您的代码中，涉及到的 Kubernetes 资源包括：Pod、ConfigMap、Service、Endpoints、namespace对应设置权限如下
+*/
+// +kubebuilder:rbac:groups=apps.egonlin.com,resources=mysqlclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps.egonlin.com,resources=mysqlclusters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps.egonlin.com,resources=mysqlclusters/finalizers,verbs=update
+
+// +kubebuilder:rbac:groups="",resources=pods;services;configmaps,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;create;update;delete
+
+// 调谐函数
+func (r *MysqlClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	log.Info("调谐函数触发执行", "req", req) // 额外增加1个字段
+
+	var cluster databasev1.MysqlCluster
+	if err := r.Get(ctx, req.NamespacedName, &cluster); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if cluster.Annotations["apps.egonlin.com/switchover-to"] != "" {
+		if err := r.plannedSwitchover(ctx, &cluster); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	// 检查是否已经初始化
+	if _, ok := cluster.Annotations["initialized"]; !ok {
+		// 未初始，则调用初始化函数
+		if err := r.init(ctx, &cluster); err != nil {
+			log.Info("初始化集群失败")
+			return ctrl.Result{}, err
+		} else {
+			log.Info("初始化集群成功")
+		}
+
+		// 设置 annotation 表示初始化已完成
+		if cluster.Annotations == nil {
+			cluster.Annotations = make(map[string]string)
+		}
+		cluster.Annotations["initialized"] = "true"
+		if err := r.Update(ctx, &cluster); err != nil {
+			return ctrl.Result{}, err
+		}
+	} else {
+		// 已经初始完成，则进入检测逻辑
+		// Record the current master's identity while it is healthy, so it is
+		// still known after the Pod or its Endpoint disappears.
+		updated, err := r.observeMasterIdentity(ctx, &cluster)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if updated {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		// Resolve a missing master before recreating any missing Pod.
+		result, err := r.reconcileMasterSlave(ctx, cluster)
+		if err != nil {
+			return result, err
+		}
+		if result.Requeue || result.RequeueAfter > 0 {
+			return result, nil
+		}
+		result, err = r.reconcileReplicas(ctx, cluster)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	// Endpoint 更新可能晚于 Pod 事件；定期复核可避免漏掉这次状态变化。
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// 在cmd/main.go入口main函数中会调用该函数，来对你的控制器进行设置，指定控制器管理的资源，并将控制器注册到控制器管理器中
+func (r *MysqlClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// 增加：Owns(&v1.Pod{})，确保检测pod资源
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&databasev1.MysqlCluster{}).
+		Owns(&v1.Pod{}).
+		Complete(r)
+}
+
+// bug说明
+// 上述SetupWithManager的核心在与针对MysqlCluster资源所拥有的Pod控制器只会在 MysqlCluster 对象本身发生 创建 / 更新 / 删除 时被触发
+// 我检测当pod发生挂掉时，会触发调谐函数的执行，检查主从状态的逻辑是根据endpoint来判断的，如果endpoint控制器摘出失效的ednpoint的慢了（异步执行的），会导致我的调谐逻辑运行失效，所有从库的主从状态都挂掉，
+// 然而后续也不会有事件出来了，这就会导致主从状态无法恢复正常，这个该如何解决呢？
+// 在SetupWithManager中添加对相关endpoint的watch事件，例如下面的样子，代码没有经过测试，只罗列大致逻辑
+// func (r *MysqlClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+//     return ctrl.NewControllerManagedBy(mgr).
+//         For(&databasev1.MysqlCluster{}).
+//         Owns(&corev1.Pod{}).
+//         Watches(&source.Kind{Type: &corev1.Endpoints{}}, &handler.EnqueueRequestForOwner{
+//             OwnerType:    &databasev1.MysqlCluster{},
+//             IsController: true,
+//         }).
+//         Complete(r)
+// }
+// 这样：
+// （1）Pod 变动触发 Reconcile
+// （2）Endpoint 更新/删除 也会触发 Reconcile
+// → 你就不会错过 Endpoint 状态更新。

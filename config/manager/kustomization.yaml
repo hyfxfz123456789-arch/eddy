@@ -1,0 +1,8 @@
+resources:
+- manager.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: controller
+  newName: crpi-g5ad06a0z4okpo04.cn-shanghai.personal.cr.aliyuncs.com/hyf-test/mysql-operator
+  newTag: lab-auto-failover-fix-20261029-2010
