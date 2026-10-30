@@ -11,6 +11,14 @@ type StorageConfig struct {
 	Size             string `json:"size"`
 }
 
+// BackupConfig configures daily logical backups to a dedicated PVC.
+type BackupConfig struct {
+	Enabled  bool          `json:"enabled,omitempty"`
+	Schedule string        `json:"schedule,omitempty"`
+	TimeZone string        `json:"timeZone,omitempty"`
+	Storage  StorageConfig `json:"storage,omitempty"`
+}
+
 // 子结构体：用于资源限制
 // 资源请求定义
 type ResourceRequests struct {
@@ -38,13 +46,21 @@ type MysqlClusterSpec struct {
 	MasterService string               `json:"masterService"`
 	SlaveService  string               `json:"slaveService"`
 	Storage       StorageConfig        `json:"storage"`
+	Backup        BackupConfig         `json:"backup,omitempty"`
 	Resources     ResourceRequirements `json:"resources"`
 }
 
 // 2、定制status信息
 type MysqlClusterStatus struct {
-	Master string   `json:"master"`
-	Slaves []string `json:"slaves"`
+	Master string       `json:"master"`
+	Slaves []string     `json:"slaves"`
+	Backup BackupStatus `json:"backup,omitempty"`
+}
+
+type BackupStatus struct {
+	LastJob         string `json:"lastJob,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	LastSuccessTime string `json:"lastSuccessTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true

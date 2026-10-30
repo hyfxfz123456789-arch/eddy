@@ -37,6 +37,25 @@ spec:
             type: object
           spec:
             properties:
+              backup:
+                properties:
+                  enabled:
+                    type: boolean
+                  schedule:
+                    type: string
+                  timeZone:
+                    type: string
+                  storage:
+                    properties:
+                      size:
+                        type: string
+                      storageClassName:
+                        type: string
+                    required:
+                    - size
+                    - storageClassName
+                    type: object
+                type: object
               image:
                 description: |-
                   MasterConfig  string `json:"masterConfig"`
@@ -104,15 +123,21 @@ spec:
           status:
             description: 2、定制status信息
             properties:
+              backup:
+                properties:
+                  lastJob:
+                    type: string
+                  phase:
+                    type: string
+                  lastSuccessTime:
+                    type: string
+                type: object
               master:
                 type: string
               slaves:
                 items:
                   type: string
                 type: array
-            required:
-            - master
-            - slaves
             type: object
         type: object
     served: true

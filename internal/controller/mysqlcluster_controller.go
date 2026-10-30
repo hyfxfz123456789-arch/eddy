@@ -43,6 +43,7 @@ type MysqlClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs;cronjobs,verbs=get;list;watch;create;update;delete
 
 // 调谐函数
 func (r *MysqlClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -70,7 +71,7 @@ func (r *MysqlClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			log.Info("初始化集群成功")
 		}
 
-		// 设置 annotation 表示初始化已完成
+		// 设置 annotation 表示初始化已	完成
 		if cluster.Annotations == nil {
 			cluster.Annotations = make(map[string]string)
 		}
@@ -100,6 +101,9 @@ func (r *MysqlClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		result, err = r.reconcileReplicas(ctx, cluster)
 		if err != nil {
 			return result, err
+		}
+		if err := r.reconcileBackup(ctx, &cluster); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
